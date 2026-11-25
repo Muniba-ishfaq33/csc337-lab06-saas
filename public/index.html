@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lab 06 - Multi-Tenant Order Platform</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-dark bg-dark mb-4">
+  <div class="container">
+    <span class="navbar-brand mb-0 h1">Multi-Tenant Order Platform</span>
+    <span id="whoami" class="navbar-text text-white-50">Not logged in</span>
+  </div>
+</nav>
+
+<div class="container pb-5">
+
+  <!-- LOGIN -->
+  <div id="loginCard" class="card shadow-sm mx-auto" style="max-width: 440px;">
+    <div class="card-body">
+      <h5 class="card-title mb-3">Sign in to a tenant</h5>
+      <label class="form-label">Tenant</label>
+      <select id="tenant" class="form-select mb-2">
+        <option value="acme">Acme Traders (acme)</option>
+        <option value="globex">Globex Pharma (globex)</option>
+      </select>
+      <label class="form-label">Email</label>
+      <input id="email" class="form-control mb-2" value="admin@acme.com" />
+      <label class="form-label">Password</label>
+      <input id="password" type="password" class="form-control mb-3" value="Acme@123" />
+      <button id="loginBtn" class="btn btn-dark w-100">Login</button>
+      <div id="loginError" class="text-danger small mt-2"></div>
+    </div>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="dash" class="d-none">
+    <div class="row g-4">
+
+      <div class="col-lg-5">
+        <div class="card shadow-sm mb-4">
+          <div class="card-body">
+            <h5 class="card-title">Place an order</h5>
+            <div class="row g-2">
+              <div class="col-8"><select id="product" class="form-select"></select></div>
+              <div class="col-4"><input id="qty" type="number" min="1" value="2" class="form-control" /></div>
+            </div>
+            <button id="orderBtn" class="btn btn-primary mt-3 w-100">Place order (POST /api/v1/orders)</button>
+            <pre id="orderResp" class="bg-dark text-success small p-2 mt-3 rounded mb-0" style="min-height:70px;">Waiting for an order...</pre>
+          </div>
+        </div>
+
+        <div class="card shadow-sm mb-4">
+          <div class="card-body">
+            <h5 class="card-title">Consumer log (Kafka offsets)</h5>
+            <div class="table-responsive">
+              <table class="table table-sm small mb-0">
+                <thead><tr><th>Order</th><th>Partition</th><th>Offset</th><th>Outcome</th></tr></thead>
+                <tbody id="events"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title">Serverless invoice: cold vs warm</h5>
+            <table class="table table-sm small mb-0">
+              <thead><tr><th>Start</th><th>Calls</th><th>Function ms</th><th>Round-trip ms</th></tr></thead>
+              <tbody id="invoices"><tr><td colspan="4" class="text-muted">No invoices yet</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-7">
+        <div class="card shadow-sm mb-4">
+          <div class="card-body">
+            <h5 class="card-title">Latest orders (this tenant only)</h5>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>#</th><th>Status</th><th>Items</th><th>Total</th><th>Created</th></tr></thead>
+                <tbody id="orders"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title">Database performance lab</h5>
+            <div class="d-flex flex-wrap gap-2 mb-3">
+              <button class="btn btn-outline-dark btn-sm" onclick="runCompare()">N+1 vs JOIN</button>
+              <button class="btn btn-outline-dark btn-sm" onclick="runExplain()">EXPLAIN ANALYZE</button>
+              <button class="btn btn-outline-danger btn-sm" onclick="toggleIndex('drop')">Drop index</button>
+              <button class="btn btn-outline-success btn-sm" onclick="toggleIndex('create')">Create index</button>
+            </div>
+            <pre id="benchOut" class="bg-dark text-light small p-2 rounded mb-0" style="min-height:140px; white-space:pre-wrap;">Pick a button above.</pre>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  let token = null;
+  let timer = null;
+  const $ = (id) => document.getElementById(id);
+
+  const creds = {
+    acme: ['admin@acme.com', 'Acme@123'],
+    globex: ['admin@globex.com', 'Globex@123'],
+  };
+  $('tenant').addEventListener('change', (e) => {
+    $('email').value = creds[e.target.value][0];
+    $('password').value = creds[e.target.value][1];
+  });
+
+  async function api(path, opts = {}) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = 'Bearer ' + token;
+    else headers['x-tenant-id'] = $('tenant').value;
+    const res = await fetch('/api/v1' + path, { ...opts, headers });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  $('loginBtn').onclick = async () => {
+    $('loginError').textContent = '';
+    try {
+      const data = await api('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: $('email').value, password: $('password').value }),
+      });
+      token = data.token;
+      $('whoami').textContent = `${data.tenant.name} | ${data.user.email}`;
+      $('loginCard').classList.add('d-none');
+      $('dash').classList.remove('d-none');
+      const products = await api('/products');
+      $('product').innerHTML = products.map((p) => `<option value="${p.id}">${p.name} - $${p.price}</option>`).join('');
+      refresh();
+      timer = setInterval(refresh, 3000);
+    } catch (e) {
+      $('loginError').textContent = e.message;
+    }
+  };
+
+  const badge = { PENDING: 'warning text-dark', COMPLETED: 'success', FAILED: 'danger' };
+
+  async function refresh() {
+    try {
+      const [orders, events, inv] = await Promise.all([api('/orders?limit=10'), api('/events'), api('/invoices/stats')]);
+      $('orders').innerHTML = orders.orders.map((o) =>
+        `<tr><td>${o.id}</td><td><span class="badge bg-${badge[o.status]}">${o.status}</span></td>
+         <td>${o.items.length}</td><td>$${Number(o.total).toFixed(2)}</td><td>${new Date(o.created_at).toLocaleString()}</td></tr>`).join('');
+      $('events').innerHTML = events.map((e) =>
+        `<tr><td>#${e.order_id}</td><td>${e.kafka_partition}</td><td>${e.kafka_offset}</td><td>${e.outcome}</td></tr>`).join('')
+        || '<tr><td colspan="4" class="text-muted">No events processed yet</td></tr>';
+      if (inv.length) {
+        $('invoices').innerHTML = inv.map((r) =>
+          `<tr><td>${r.start_type}</td><td>${r.calls}</td><td>${r.avg_function_ms}</td><td>${r.avg_roundtrip_ms}</td></tr>`).join('');
+      }
+    } catch (e) { /* ignore refresh hiccups */ }
+  }
+
+  $('orderBtn').onclick = async () => {
+    try {
+      const data = await api('/orders', {
+        method: 'POST',
+        body: JSON.stringify({ items: [{ product_id: Number($('product').value), quantity: Number($('qty').value) }] }),
+      });
+      $('orderResp').textContent = '202 Accepted\n' + JSON.stringify(data, null, 2);
+      refresh();
+    } catch (e) {
+      $('orderResp').textContent = 'Error: ' + e.message;
+    }
+  };
+
+  async function show(promise) {
+    $('benchOut').textContent = 'Running...';
+    try {
+      const data = await promise;
+      $('benchOut').textContent = data.plan
+        ? `index present: ${data.index_present}\nround trip: ${data.round_trip_ms} ms\n\n${data.plan}`
+        : JSON.stringify(data, null, 2);
+    } catch (e) { $('benchOut').textContent = 'Error: ' + e.message; }
+  }
+  const runCompare = () => show(api('/benchmark/compare?limit=100'));
+  const runExplain = () => show(api('/benchmark/explain'));
+  const toggleIndex = (action) => show(api('/benchmark/index', { method: 'POST', body: JSON.stringify({ action }) }));
+</script>
+</body>
+</html>

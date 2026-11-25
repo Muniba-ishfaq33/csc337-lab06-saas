@@ -1,0 +1,9 @@
+{
+  "name": "lab06-invoice-function",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serverless invoice generator (Vercel). Reports cold vs warm start.",
+  "dependencies": {
+    "pdfkit": "^0.15.0"
+  }
+}
